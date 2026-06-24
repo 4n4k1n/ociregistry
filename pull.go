@@ -58,7 +58,7 @@ func Pull(image, tag, dest string) (*PullResult, error) {
 
 	var layers []Layer
 	for _, desc := range m.Layers {
-		layerDir := filepath.Join(layersDir, desc.Digest)
+		layerDir := filepath.Join(layersDir, strings.ReplaceAll(desc.Digest, ":", "_"))
 		if err := extractLayer(image, desc.Digest, layerDir, token); err != nil {
 			return nil, fmt.Errorf("layer %.12s: %w", desc.Digest, err)
 		}
