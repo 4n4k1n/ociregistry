@@ -57,6 +57,14 @@ func extractLayer(image, digest, dest, token string) error {
 }
 
 func untar(tr *tar.Reader, dest string) error {
+	// Directory modes are applied in a second pass: a restrictive mode (e.g.
+	// 0555) must not stop us writing the directory's children first.
+	type dirMode struct {
+		path string
+		mode os.FileMode
+	}
+	var dirs []dirMode
+
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -80,11 +88,20 @@ func untar(tr *tar.Reader, dest string) error {
 			continue
 		}
 
+		// hdr.FileInfo().Mode() converts the raw tar mode into an os.FileMode
+		// with the setuid/setgid/sticky bits in the right places; hdr.Mode
+		// alone would misplace them. We chmod explicitly because MkdirAll /
+		// OpenFile apply the umask and ignore the special bits.
+		mode := hdr.FileInfo().Mode()
+
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			os.MkdirAll(target, os.FileMode(hdr.Mode))
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return err
+			}
+			dirs = append(dirs, dirMode{target, mode})
 		case tar.TypeReg:
-			if err := writeFile(tr, target, os.FileMode(hdr.Mode)); err != nil {
+			if err := writeFile(tr, target, mode); err != nil {
 				return err
 			}
 		case tar.TypeSymlink:
@@ -96,6 +113,13 @@ func untar(tr *tar.Reader, dest string) error {
 			os.Link(filepath.Join(dest, filepath.Clean(hdr.Linkname)), target)
 		}
 	}
+
+	// Apply directory modes now that all children exist.
+	for _, d := range dirs {
+		if err := os.Chmod(d.path, d.mode); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -103,11 +127,15 @@ func writeFile(r io.Reader, path string, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	_, err = io.Copy(f, r)
-	return err
+	f.Close()
+	if err != nil {
+		return err
+	}
+	// Set the exact mode (setuid/setgid/sticky + perms) free of the umask.
+	return os.Chmod(path, mode)
 }
